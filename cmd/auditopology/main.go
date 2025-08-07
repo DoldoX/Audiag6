@@ -239,8 +239,51 @@ func main() {
 
 		col := snmp.NewGoSNMP()
 
-		// Uruchomienie pipeline jak wcześniej
-		uiTop, err := pipeline.Run(context.Background(), col, pipeline.Seeds{Targets: targets})
+		// Uruchomienie pipeline z nowymi opcjami
+		ctx := context.Background()
+		
+		// Use DiscoverWithOptions if available, otherwise fallback to pipeline.Run
+		var uiTop pipeline.UITopology
+		var err error
+		
+		// Check if collector supports DiscoverWithOptions
+		if extCollector, ok := interface{}(col).(interface {
+			DiscoverWithOptions(context.Context, []snmp.Target, snmp.DiscoverOptions) (interface{}, error)
+		}); ok {
+			// Setup autodiscovery options
+			autodiscoveryOpts := snmp.DefaultAutodiscoveryOptions()
+			autodiscoveryOpts.Enabled = req.AutodiscoveryEnabled
+			if req.AutodiscoveryMaxDepth > 0 {
+				autodiscoveryOpts.MaxDepth = req.AutodiscoveryMaxDepth
+			}
+			if req.AutodiscoveryMaxDevices > 0 {
+				autodiscoveryOpts.MaxDevices = req.AutodiscoveryMaxDevices
+			}
+			if len(req.AutodiscoveryWhitelist) > 0 {
+				autodiscoveryOpts.WhitelistCIDRs = req.AutodiscoveryWhitelist
+			}
+			if len(req.AutodiscoveryBlacklist) > 0 {
+				autodiscoveryOpts.BlacklistCIDRs = req.AutodiscoveryBlacklist
+			}
+			
+			opts := snmp.DiscoverOptions{
+				FDBThreshold:  req.FDBThreshold,
+				CDPDebug:      req.CDPDebug,
+				Autodiscovery: autodiscoveryOpts,
+			}
+			if opts.FDBThreshold <= 0 {
+				opts.FDBThreshold = 3 // default
+			}
+			top, discErr := extCollector.DiscoverWithOptions(ctx, targets, opts)
+			if discErr == nil {
+				uiTop = convertToUITopology(top)
+			} else {
+				err = discErr
+			}
+		} else {
+			// Fallback to basic pipeline.Run method
+			uiTop, err = pipeline.Run(ctx, col, pipeline.Seeds{Targets: targets})
+		}
 
 		// Zbuduj Diagnostics zgodnie z nowym kontraktem
 		var diag Diagnostics

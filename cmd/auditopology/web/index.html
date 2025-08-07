@@ -33,6 +33,8 @@
     .note { font-size: 12px; color: #94a3b8; }
     .status { margin-top: 8px; font-size: 12px; color: #a3e635; }
     .error { color: #ef4444; }
+    #workdir-controls { display: flex; align-items: center; gap: 4px; }
+    #workdirPath { flex-grow: 1; }
   </style>
   <script src="https://unpkg.com/cytoscape@3.27.0/dist/cytoscape.min.js"></script>
   <script src="https://unpkg.com/elkjs@0.9.1/lib/elk.bundled.js"></script>
@@ -78,6 +80,51 @@
       <button id="btnScan">Skanuj</button>
       <div id="status" class="status"></div>
       <hr/>
+      <h3>2) Ustawienia</h3>
+      <div class="field">
+          <label for="workdirPath">Folder roboczy (Workdir)</label>
+          <div id="workdir-controls">
+              <input type="text" id="workdirPath" readonly>
+              <button id="changeWorkdirBtn">Zmień</button>
+          </div>
+          <div id="workdirStatus" class="status"></div>
+      </div>
+      <div class="field">
+        <label for="toggleIPs">Pokazuj IP na grafie</label>
+        <input type="checkbox" id="toggleIPs" />
+      </div>
+      <div class="field">
+        <label for="fdbThreshold">Próg FDB (wspólne MAC-y)</label>
+        <input type="number" id="fdbThreshold" min="1" max="10" value="3" />
+      </div>
+      
+      <h4>🔍 Autodiscovery</h4>
+      <div class="field">
+        <label for="autodiscoveryEnabled">
+          <input type="checkbox" id="autodiscoveryEnabled" />
+          Włącz automatyczne odkrywanie urządzeń
+        </label>
+      </div>
+      <div id="autodiscoveryOptions" style="display:none; margin-left: 20px;">
+        <div class="field">
+          <label for="autodiscoveryMaxDepth">Maksymalna głębokość (hops)</label>
+          <input type="number" id="autodiscoveryMaxDepth" min="1" max="5" value="2" />
+        </div>
+        <div class="field">
+          <label for="autodiscoveryMaxDevices">Limit urządzeń</label>
+          <input type="number" id="autodiscoveryMaxDevices" min="10" max="200" value="50" />
+        </div>
+        <div class="field">
+          <label for="autodiscoveryWhitelist">Dozwolone sieci (CIDR, po jednej w linii)</label>
+          <textarea id="autodiscoveryWhitelist" rows="3" placeholder="192.168.0.0/16&#10;10.0.0.0/8"></textarea>
+        </div>
+        <div class="field">
+          <label for="autodiscoveryBlacklist">Zabronione sieci (CIDR, po jednej w linii)</label>
+          <textarea id="autodiscoveryBlacklist" rows="2" placeholder="127.0.0.0/8&#10;169.254.0.0/16">127.0.0.0/8
+169.254.0.0/16</textarea>
+        </div>
+      </div>
+      <hr/>
       <div class="note">
         Ten prototyp uruchamia pipeline z kolektorem NoOp (dane przykładowe). W następnym kroku podłączymy realny SNMP.
       </div>
@@ -89,6 +136,7 @@
   <div id="diagPanel">
     <h3>Diagnostyka skanu</h3>
     <div class="muted" id="diagSummary">Brak danych diagnostycznych – wykonaj skan.</div>
+    <div id="scanSavePath" class="note" style="margin-top: 5px; color: #22c55e;"></div>
     <h4>Urządzenia</h4>
     <table class="tbl" id="tblDevices">
       <thead><tr><th>Nazwa</th><th>LLDP (local/remote)</th><th>FDB wpisy</th><th>VLANy</th><th>Błędy</th></tr></thead>
@@ -99,6 +147,11 @@
       <thead><tr><th>Źródło</th><th>Pewność</th><th>A</th><th>B</th><th>VLAN</th><th>sharedMacs</th><th>sampleMacs</th><th>Info</th></tr></thead>
       <tbody></tbody>
     </table>
+    <h4>Autodiscovery</h4>
+    <div id="autodiscoveryResults" class="note" style="display:none;">
+      <p><strong>Wyniki automatycznego odkrywania:</strong></p>
+      <div id="autodiscoveryStats"></div>
+    </div>
     <h4>Surowe (JSON)</h4>
     <pre class="json" id="rawJson"></pre>
   </div>
@@ -123,12 +176,31 @@
       v2: document.getElementById('snmpV2'),
       btnScan: document.getElementById('btnScan'),
       status: document.getElementById('status'),
+      workdirPath: document.getElementById('workdirPath'),
+      workdirStatus: document.getElementById('workdirStatus'),
+      changeWorkdirBtn: document.getElementById('changeWorkdirBtn'),
+      scanSavePath: document.getElementById('scanSavePath'),
+      toggleIPs: document.getElementById('toggleIPs'),
+      fdbThreshold: document.getElementById('fdbThreshold'),
+      
+      // Autodiscovery elements
+      autodiscoveryEnabled: document.getElementById('autodiscoveryEnabled'),
+      autodiscoveryOptions: document.getElementById('autodiscoveryOptions'),
+      autodiscoveryMaxDepth: document.getElementById('autodiscoveryMaxDepth'),
+      autodiscoveryMaxDevices: document.getElementById('autodiscoveryMaxDevices'),
+      autodiscoveryWhitelist: document.getElementById('autodiscoveryWhitelist'),
+      autodiscoveryBlacklist: document.getElementById('autodiscoveryBlacklist'),
     };
 
     els.snmpVersion.addEventListener('change', () => {
       const isV3 = els.snmpVersion.value === 'v3';
       els.v3.box.style.display = isV3 ? '' : 'none';
       els.v2.style.display = isV3 ? 'none' : '';
+    });
+
+    // Autodiscovery toggle
+    els.autodiscoveryEnabled.addEventListener('change', () => {
+      els.autodiscoveryOptions.style.display = els.autodiscoveryEnabled.checked ? 'block' : 'none';
     });
 
     async function fetchTopology() {
@@ -147,26 +219,53 @@
       return res.json();
     }
 
-    // Ostatnia diagnostyka
+    // Ostatnia diagnostyka i topologia
     let lastDiagnostics = null;
+    let lastTopology = null;
 
     function renderDiagnostics(diag, uiTop) {
       lastDiagnostics = diag || null;
+      lastTopology = uiTop || null;
+
       document.getElementById('diagPanel').style.display = 'block';
       const sum = document.getElementById('diagSummary');
       const devTbody = document.querySelector('#tblDevices tbody');
       const edgeTbody = document.querySelector('#tblEdges tbody');
       const raw = document.getElementById('rawJson');
+      const autodiscoveryResults = document.getElementById('autodiscoveryResults');
+      const autodiscoveryStats = document.getElementById('autodiscoveryStats');
+      
       devTbody.innerHTML = '';
       edgeTbody.innerHTML = '';
+      els.scanSavePath.textContent = '';
+      autodiscoveryResults.style.display = 'none';
 
-      // pokaż pełny JSON (topology + diagnostics) w panelu
+      // Pokaż pełny JSON (topology + diagnostics) w panelu
       try {
         raw.textContent = JSON.stringify({ diagnostics: diag, topology: uiTop }, null, 2);
       } catch { raw.textContent = String(diag); }
 
       const stats = (diag && diag.stats) || {};
       sum.innerHTML = `Węzły: ${stats.nodes ?? 0}, Krawędzie: ${stats.edges ?? 0}. Źródła: ${(stats.source||[]).join(', ')}`;
+
+      if (diag && diag.raw && diag.raw.savedTo) {
+        els.scanSavePath.textContent = `Zapisano do: ${diag.raw.savedTo}`;
+      }
+
+      // Show autodiscovery results if available
+      if (diag && diag.raw && diag.raw.autodiscovery) {
+        const ad = diag.raw.autodiscovery;
+        autodiscoveryResults.style.display = 'block';
+        autodiscoveryStats.innerHTML = `
+          <ul>
+            <li><strong>Znalezione urządzenia:</strong> ${ad.totalDevices || 0}</li>
+            <li><strong>Maksymalna głębokość:</strong> ${ad.maxDepthReached || 0}</li>
+            <li><strong>Czas skanowania:</strong> ${ad.duration || 'N/A'}</li>
+            <li><strong>Oryginalne seeds:</strong> ${ad.originalSeeds || 'N/A'}</li>
+            ${ad.errors ? `<li style="color: #ef4444;"><strong>Błędy:</strong> ${ad.errors}</li>` : ''}
+          </ul>
+        `;
+      }
 
       // Devices table: korzystamy z evidence przeniesionego do topology.nodes[].evidence
       const nodes = (uiTop.nodes || []);
@@ -200,13 +299,24 @@
       });
     }
 
+    function getNodeLabel(nodeData, showIPs) {
+        let label = nodeData.label || nodeData.id;
+        if (showIPs) {
+            const ips = nodeData.evidence && nodeData.evidence.mgmtIPs;
+            if (ips && ips.length > 0) {
+                label += `\n(${ips.join(', ')})`;
+            }
+        }
+        return label;
+    }
+
     function mapToCytoscape(top) {
       const elements = [];
       const roleToColor = { core: '#60a5fa', distribution: '#22d3ee', access: '#34d399' };
       const vendorToShape = { default: 'round-rectangle' };
 
       (top.nodes || []).forEach(n => {
-        elements.push({ data: { id: n.id, label: n.label, role: n.role || 'unknown', vendor: n.vendor || 'default' }, classes: n.role || '' });
+        elements.push({ data: { id: n.id, label: n.label, role: n.role || 'unknown', vendor: n.vendor || 'default', evidence: n.evidence }, classes: n.role || '' });
       });
       (top.edges || []).forEach(e => {
         elements.push({ data: { id: e.id, source: e.source, target: e.target, type: e.type || 'link', label: e.label || '', score: e.score || 'low' }, classes: e.type || 'link' });
@@ -216,12 +326,13 @@
         { selector: 'node', style: {
           'background-color': ele => roleToColor[ele.data('role')] || '#818cf8',
           'shape': ele => vendorToShape[ele.data('vendor')] || vendorToShape.default,
-          'label': 'data(label)',
+          'label': ele => getNodeLabel(ele.data(), els.toggleIPs.checked),
           'text-valign': 'center', 'text-halign': 'center',
           'color': '#e2e8f0', 'font-size': 10,
           'padding': '8px', 'border-width': 1, 'border-color': '#0b1220',
           'width': 'mapData(label.length, 0, 20, 60, 120)',
-          'height': 32
+          'height': 32,
+          'text-wrap': 'wrap',
         }},
         { selector: 'edge', style: {
           'curve-style': 'straight', 'line-color': '#64748b',
@@ -286,6 +397,9 @@
           .split(/[\n,; ]+/)
           .map(s => s.trim())
           .filter(Boolean);
+        // Parse autodiscovery lists
+        const parseLines = (text) => text.split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+        
         const body = {
           seeds,
           snmpVersion: els.snmpVersion.value,
@@ -294,7 +408,16 @@
           v3authproto: els.v3.authproto.value,
           v3authpass: els.v3.authpass.value,
           v3privproto: els.v3.privproto.value,
-          v3privpass: els.v3.privpass.value
+          v3privpass: els.v3.privpass.value,
+          fdbThreshold: parseInt(els.fdbThreshold.value) || 3,
+          cdpDebug: true,
+          
+          // Autodiscovery options
+          autodiscoveryEnabled: els.autodiscoveryEnabled.checked,
+          autodiscoveryMaxDepth: parseInt(els.autodiscoveryMaxDepth.value) || 2,
+          autodiscoveryMaxDevices: parseInt(els.autodiscoveryMaxDevices.value) || 50,
+          autodiscoveryWhitelist: parseLines(els.autodiscoveryWhitelist.value),
+          autodiscoveryBlacklist: parseLines(els.autodiscoveryBlacklist.value)
         };
         const resp = await postScan(body);
         if (resp.status !== 'ok') {
@@ -344,8 +467,65 @@
       }
     };
 
+    // --- Workdir Management ---
+    async function fetchAndDisplayWorkdir() {
+        try {
+            const response = await fetch('/api/workdir');
+            const data = await response.json();
+            if (response.ok) {
+                els.workdirPath.value = data.path;
+            } else {
+                els.workdirStatus.textContent = `Błąd: ${data.error || 'Nie można pobrać ścieżki'}`;
+                els.workdirStatus.classList.add('error');
+            }
+        } catch (error) {
+            els.workdirStatus.textContent = `Błąd: ${error.message}`;
+            els.workdirStatus.classList.add('error');
+        }
+    }
+
+    els.changeWorkdirBtn.addEventListener('click', async () => {
+        const currentPath = els.workdirPath.value;
+        const newPath = prompt('Podaj nową ścieżkę dla folderu roboczego (workdir):', currentPath);
+        
+        if (newPath && newPath.trim() !== '' && newPath.trim() !== currentPath) {
+            els.workdirStatus.textContent = 'Ustawianie nowej ścieżki...';
+            els.workdirStatus.classList.remove('error');
+            try {
+                const response = await fetch('/api/workdir', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: newPath.trim() })
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    els.workdirPath.value = data.path;
+                    els.workdirStatus.textContent = 'Ścieżka zaktualizowana.';
+                } else {
+                    throw new Error(data.error || 'Nieznany błąd serwera');
+                }
+            } catch (error) {
+                els.workdirStatus.textContent = `Błąd: ${error.message}`;
+                els.workdirStatus.classList.add('error');
+                alert(`Nie udało się zmienić ścieżki: ${error.message}`);
+            } finally {
+                setTimeout(() => { 
+                    els.workdirStatus.textContent = ''; 
+                    els.workdirStatus.classList.remove('error');
+                }, 4000);
+            }
+        }
+    });
+
+    els.toggleIPs.addEventListener('change', () => {
+        if (cy) {
+            cy.style().update(); // Re-apply styles to update labels
+        }
+    });
+
     // Start
     reload();
+    fetchAndDisplayWorkdir();
   </script>
 </body>
 </html>

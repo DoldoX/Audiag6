@@ -13,6 +13,13 @@ type ScanRequest struct {
 	V3PrivPass   string   `json:"v3privpass,omitempty"`
 	FDBThreshold int      `json:"fdbThreshold,omitempty"` // minimalna liczba wspólnych MAC dla połączenia (domyślnie 3)
 	CDPDebug     bool     `json:"cdpDebug,omitempty"`     // gdy true: dołącz surowy zrzut OID->value CDP do diagnostics.raw.cdp
+	
+	// Autodiscovery options
+	AutodiscoveryEnabled    bool     `json:"autodiscoveryEnabled,omitempty"`
+	AutodiscoveryMaxDepth   int      `json:"autodiscoveryMaxDepth,omitempty"`   // max hops (default: 2)
+	AutodiscoveryMaxDevices int      `json:"autodiscoveryMaxDevices,omitempty"` // safety limit (default: 50)
+	AutodiscoveryWhitelist  []string `json:"autodiscoveryWhitelist,omitempty"`  // allowed CIDRs
+	AutodiscoveryBlacklist  []string `json:"autodiscoveryBlacklist,omitempty"`  // forbidden CIDRs
 }
 
 // Evidence structures exposed in API

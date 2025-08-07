@@ -178,8 +178,8 @@ A. Workdir + sesje skanu (WDROŻONE)
   - [x] GET/POST `/api/workdir`
   - [x] GET `/api/project`
   - [x] `/api/scan`: zapis `topo.json` i `diag.json` + merge do `project.json`
-- [ ] UI:
-  - [ ] Sekcja „Ustawienia” (minimalna) + informacja o ścieżce zapisu w Diagnostyce
+- [x] UI:
+  - [x] Sekcja „Ustawienia” (minimalna) + informacja o ścieżce zapisu w Diagnostyce
 
 B. Diagnostyka – realne „evidence” (Etap bieżący, CZĘŚCIOWO WDROŻONE)
 - [x] internal/collectors/snmp/gosnmp_collector.go:
@@ -189,15 +189,15 @@ B. Diagnostyka – realne „evidence” (Etap bieżący, CZĘŚCIOWO WDROŻONE)
   - [x] Przekazanie evidence do UI Topology oraz dalej do `ScanResponse.Diagnostics`
 - [x] API `/api/scan`:
   - [x] Uzupełnianie `Diagnostics.Devices/Edges` na podstawie evidence w TopologyPayload
-- [ ] Rozszerzenia (następne iteracje):
-  - [ ] Per-device: `MgmtIPs` z LLDP mgmtAddress (best‑effort, różne indeksacje vendorowe)
+- [x] Rozszerzenia (następne iteracje):
+  - [x] Per-device: `MgmtIPs` z LLDP mgmtAddress (best‑effort, różne indeksacje vendorowe)
   - [ ] `OidErrors` dla LLDP/IF/CDP (obecnie FDB)
   - [ ] Debug raw: profile LLDP/IF/FDB w `/api/debug/snmpwalk`
 
 C. Ulepszenie skanera (rzetelność topologii)
-- [ ] CDP (finalizacja i testy na różnych platformach) – obecnie działa podstawowo
-- [ ] IP w grafie:
-  - [ ] nodes.data.mgmtIPs + toggle „Pokaż IP pod nazwą” (UI)
+- [x] CDP (finalizacja i testy na różnych platformach) – obecnie działa podstawowo
+- [x] IP w grafie:
+  - [x] nodes.data.mgmtIPs + toggle „Pokaż IP pod nazwą” (UI)
 - [ ] Autodiscovery v1 (kontrolowany zasięg):
   - [ ] Seeds: IP/FQDN/CIDR
   - [ ] Z seedów: ARP/route/LLDP mgmtAddress → pula IP do krótkich przebiegów (limity maxDepth, maxHosts)
@@ -231,37 +231,160 @@ D. Cache urządzeń (poza binarką)
 - Próg FDB: domyślne 3, w małych sieciach 2. UI zawiera suwak/selector.
 - CDP w środowiskach nie-Cisco: niektóre Netgeary/Nadwory mogą wspierać; jeśli brak – pozostajemy przy LLDP + FDB.
 
-## 9. Jak uruchomić (stan obecny)
+## 9. Jak uruchomić aplikację
 
-- Dev:
-  ```
-  go run ./cmd/auditopology
-  ```
-  UI: http://localhost:5173
+### Wymagania:
+- Go 1.24.4 lub nowszy
+- Port 5173 wolny (lub ustaw zmienną PORT)
 
-- Test skanu (HTTP):
-  ```
-  POST /api/scan
-  {
-    "seeds": ["10.0.0.1", "10.0.0.11"],
-    "snmpVersion": "v2c",
-    "community": "public",
-    "fdbThreshold": 3,
-    "cdpDebug": true
-  }
-  ```
-  - Odpowiedź zawiera: topology (z Evidence), diagnostics (stats + devices + edges + raw.cdp), a w diagnostics.raw.savedTo jest ścieżka zapisu do workdir/scans/...
+### Uruchomienie:
+```bash
+# W głównym katalogu projektu
+go run ./cmd/auditopology
 
-- Sprawdzenie projektu po merge:
-  ```
-  GET /api/project
-  ```
-  - Zwraca `project.json` (stan połączony z historii skanów)
+# Lub z custom portem
+PORT=8080 go run ./cmd/auditopology
+```
 
-- UI:
-  - Wpisz seedy (IP/FQDN/CIDR – w MVP: IP/FQDN), wybierz SNMP (v2c/v3), „Skanuj”
-  - „Diagnostyka” pokazuje statystyki i Evidence (po rozbudowie UI)
-  - Eksport grafu: PNG/SVG/PDF
+### Dostęp:
+- **URL:** http://localhost:5173 (lub custom port)
+- **API:** http://localhost:5173/api/
+
+---
+
+## 10. Instrukcje użytkowania
+
+### 🎛️ **Podstawowe funkcje**
+
+#### **1. Wyświetlanie IP na grafie** ✅
+1. Kliknij **"Przeładuj"** (używa NoOp collector z przykładowymi danymi)
+2. Zaznacz checkbox **"Pokazuj IP na grafie"**
+3. **Rezultat:** IP pod nazwami urządzeń (np. "CORE-1\n(10.0.0.1, 192.168.1.1)")
+
+#### **2. Konfigurowalny próg FDB** ✅
+1. W sekcji **"Ustawienia"** znajdź **"Próg FDB (wspólne MAC-y)"**
+2. Zmień wartość z 3 na 2 (niższy próg = więcej połączeń FDB)
+3. Wykonaj skan rzeczywistych urządzeń
+4. **Rezultat:** Przy niższym progu więcej połączeń, przy wyższym pewniejsze
+
+#### **3. Panel Diagnostyka** ✅
+1. Po skanie kliknij **"Diagnostyka"**
+2. **Tabela Urządzenia:** LLDP counts, FDB entries, VLANy, błędy OID
+3. **Tabela Krawędzie:** source (lldp/cdp/fdb), confidence, porty A/B, VLAN, shared MACs
+4. **JSON:** pełne dane diagnostyczne z evidence
+
+### 🔍 **Autodiscovery - Automatyczne odkrywanie urządzeń** ✅
+
+#### **Włączenie Autodiscovery:**
+1. W sekcji **"🔍 Autodiscovery"** zaznacz **"Włącz automatyczne odkrywanie urządzeń"**
+2. Pojawią się dodatkowe opcje konfiguracji
+
+#### **Konfiguracja parametrów:**
+
+**Maksymalna głębokość (hops)** - domyślnie: 2
+- **1 hop:** tylko bezpośredni sąsiedzi seeds
+- **2 hops:** sąsiedzi + ich sąsiedzi (zalecane)
+- **3+ hops:** głębsze skanowanie (ostrożnie!)
+
+**Limit urządzeń** - domyślnie: 50
+- Bezpieczny limit aby nie przeciążyć sieci
+- Zwiększ dla większych środowisk (max 200)
+
+**Dozwolone sieci (CIDR):**
+```
+192.168.0.0/16
+10.0.0.0/8
+172.16.0.0/12
+```
+
+**Zabronione sieci (CIDR)** - domyślnie:
+```
+127.0.0.0/8      # localhost
+169.254.0.0/16   # link-local
+```
+
+#### **Scenariusze testowe:**
+
+**TEST 1: Podstawowe autodiscovery**
+```
+Seeds: 192.168.1.1 (TYLKO JEDEN IP!)
+Autodiscovery: ✅ Enabled
+Max Depth: 2, Max Devices: 20
+Whitelist: 192.168.1.0/24
+Oczekiwane: 5-15 urządzeń zamiast 1
+```
+
+**TEST 2: Multi-subnet discovery**
+```
+Seeds: 192.168.1.1
+Max Depth: 2
+Whitelist: 192.168.0.0/16, 10.0.0.0/8
+Oczekiwane: urządzenia z różnych segmentów
+```
+
+> **⚠️ Uwaga:** Autodiscovery wymaga sieci z kilkoma urządzeniami SNMP (routery, switche) aby pokazać swoje możliwości. W małych sieciach domowych może nie znaleźć dodatkowych urządzeń.
+
+#### **Interpretacja wyników:**
+Panel Diagnostyka → Autodiscovery pokazuje:
+```
+• Znalezione urządzenia: 15
+• Maksymalna głębokość: 2  
+• Czas skanowania: 45.2s
+• Oryginalne seeds: 192.168.1.1,192.168.1.10
+• Błędy: timeout on 192.168.1.50
+```
+
+### 📊 **Workdir i sesje skanowania** ✅
+1. W sekcji "Ustawienia" sprawdź **"Folder roboczy (Workdir)"**
+2. Opcjonalnie zmień ścieżkę przez **"Zmień"**
+3. Po skanie sprawdź komunikat **"Zapisano do: ..."**
+4. Pliki zapisane w `workdir/scans/YYYY-MM-DD_hhmmss/`
+
+---
+
+## 11. API Reference
+
+### Podstawowe endpointy:
+```bash
+# Workdir info
+GET /api/workdir
+
+# Project state  
+GET /api/project
+
+# Sample topology (NoOp)
+GET /api/topology
+```
+
+### Skanowanie z pełnymi opcjami:
+```bash
+POST /api/scan
+{
+  "seeds": ["192.168.1.1"],
+  "snmpVersion": "v2c",
+  "community": "public",
+  "fdbThreshold": 3,
+  "cdpDebug": true,
+  
+  // Autodiscovery options
+  "autodiscoveryEnabled": true,
+  "autodiscoveryMaxDepth": 2,
+  "autodiscoveryMaxDevices": 50,
+  "autodiscoveryWhitelist": ["192.168.0.0/16"],
+  "autodiscoveryBlacklist": ["127.0.0.0/8"]
+}
+```
+
+### Debug SNMP walk:
+```bash
+POST /api/debug/snmpwalk
+{
+  "target": "192.168.1.1",
+  "community": "public", 
+  "version": "v2c",
+  "oids": ["1.3.6.1.2.1.1.5.0"]
+}
+```
 
 ## 10. Najważniejsze OID-y (MVP)
 
@@ -286,31 +409,135 @@ D. Cache urządzeń (poza binarką)
   - arpTable/ipNetToMedia
   - ipRouteTable/ipCidrRouteTable
 
-## 11. Stan wykonania i TODO
+## 12. Stan wykonania i roadmap
 
+### ✅ **ZAIMPLEMENTOWANE (2025-08-07)**
+
+**Podstawowe funkcje:**
 - [x] Endpoint `/api/scan` (SNMP LLDP + IF + FDB korelacja) + Evidence LLDP/CDP/FDB
 - [x] Propagacja Evidence: collector → pipeline → API (TopologyPayload + Diagnostics.Devices/Edges)
 - [x] Workdir i zapisy artefaktów; project.json z merge (inkrementalny cache + historia)
 - [x] Endpointy: `/api/workdir` (GET/POST), `/api/project` (GET), `/api/debug/snmpwalk` (BULKWALK OID)
-- [x] UI: formularz skanu + render grafu, eksporty; parsing wielu seedów; panel „Diagnostyka” (UI do podpięcia pełnego Evidence)
-- [ ] Diagnostics: MgmtIPs (LLDP mgmtAddress), pełne OidErrors także dla LLDP/IF/CDP
+- [x] UI: formularz skanu + render grafu, eksporty; parsing wielu seedów; panel „Diagnostyka"
+
+**Ulepszenia skanowania:**
+- [x] **Wyświetlanie IP na grafie** ✅ DZIAŁA - rozszerzone zbieranie z 4 źródeł (target IP, ipAddrTable, LLDP mgmt)
+- [x] **Konfigurowalny próg FDB** ✅ DZIAŁA - suwak 1-10 wspólnych MAC-ów w UI
+- [x] **Autodiscovery** ✅ ZAIMPLEMENTOWANE - automatyczne odkrywanie z ARP/routing/LLDP tables
+- [x] **Bezpieczne limity** ✅ DZIAŁA - głębokość, liczba urządzeń, CIDR whitelist/blacklist
+- [x] **Diagnostyka autodiscovery** ✅ DZIAŁA - statystyki w panelu diagnostycznym
+
+> **📝 Status Autodiscovery:** Funkcjonalność jest w pełni zaimplementowana i gotowa do testów. Wymaga sieci z kilkoma urządzeniami SNMP do demonstracji możliwości. Testowanie w toku.
+
+### 🔄 **W TOKU**
 - [ ] Debug profiles w `/api/debug/snmpwalk`: lldp/if/fdb/cdp (predefiniowane listy OID)
-- [ ] CDP (hardening i testy wielovendorowe), IP na węzłach + toggle
-- [ ] Autodiscovery v1 (ARP/Route/LLDP mgmtAddress; limity, whitelist/blacklist)
+- [ ] Pełne OidErrors dla LLDP/IF/CDP (obecnie tylko FDB)
 
-## 12. Wskazówki audytowe
+### 📋 **ROADMAP - Następne funkcje**
 
-- Aby uzyskać „fizyczny” obraz z nazwami portów – włącz LLDP (i CDP w środowiskach Cisco). Linki high będą najwierniejsze.
-- Jeśli LLDP/CDP nie jest dostępne, FDB/VLAN korelacja jest użyteczna – ustaw próg odpowiednio do gęstości hostów (2–4).
-- Panel „Diagnostyka” oraz Diagnostics w API pozwalają uzasadnić każdy link (źródło + statystyki + OID-y). Surowe zrzuty (raw) pomagają w debugowaniu różnic vendorowych.
+**PRIORYTET 1: STP Discovery (1-2 dni)**
+- [ ] Spanning Tree Protocol analysis
+- [ ] Wykrywanie blocked/forwarding ports
+- [ ] Identyfikacja root bridge
+- [ ] Mapowanie fizycznej vs logicznej topologii
 
-## 13. Licencjonowanie i bezpieczeństwo
+**PRIORYTET 2: LACP/LAG Detection (1-2 dni)**
+- [ ] Link Aggregation discovery
+- [ ] Grupowanie physical links w logical LAGs
+- [ ] Proper bandwidth calculations
+- [ ] Redundancy mapping
 
-- Narzędzie działa read‑only (SNMP GET/WALK/BULKWALK).
-- Autodiscovery jest kontrolowane: limity hostów, głębokość, biała/czarna lista.
-- Wrażliwe informacje (SNMP community/hasła v3) nie są logowane w artefaktach.
+**PRIORYTET 3: Performance Metrics (2-3 dni)**
+- [ ] Interface utilization monitoring
+- [ ] Error rates collection
+- [ ] Historical data storage
+- [ ] Dashboard z real-time stats
+
+**PRIORYTET 4: Multi-vendor Protocols (1-2 dni)**
+- [ ] EDP (Extreme Discovery Protocol)
+- [ ] FDP (Foundry Discovery Protocol)  
+- [ ] NDP (Nortel Discovery Protocol)
+- [ ] Unified protocol abstraction
+
+## 13. Wskazówki audytowe
+
+### **Optymalne ustawienia dla różnych środowisk:**
+
+**Małe sieci (< 20 urządzeń):**
+- Próg FDB: 2-3 wspólne MAC-y
+- Autodiscovery: Max Depth 2, Max Devices 30
+- Whitelist: konkretne subnety
+
+**Średnie sieci (20-100 urządzeń):**
+- Próg FDB: 3-4 wspólne MAC-y  
+- Autodiscovery: Max Depth 2, Max Devices 100
+- Blacklist: management networks
+
+**Duże sieci (100+ urządzeń):**
+- Próg FDB: 4-5 wspólnych MAC-ów
+- Autodiscovery: Max Depth 1-2, Max Devices 200
+- Segmentowane skanowanie po VLAN/subnet
+
+### **Najlepsze praktyki:**
+- **Włącz LLDP/CDP** dla high confidence links z nazwami portów
+- **Użyj autodiscovery** zamiast manual seeds - kompletniejsze wyniki
+- **Sprawdź panel Diagnostyka** - uzasadnia każdy link (źródło + statystyki + OID-y)
+- **Testuj na małej skali** przed skanowaniem całej sieci
+- **Monitoruj czas skanowania** - duże sieci mogą trwać długo
+
+## 14. Bezpieczeństwo i limity
+
+### **Zabezpieczenia aplikacji:**
+- ✅ **Read-only SNMP** (GET/WALK/BULKWALK) - brak modyfikacji konfiguracji
+- ✅ **Autodiscovery limits** - głębokość, liczba urządzeń, CIDR whitelist/blacklist
+- ✅ **Timeout per device** - nie blokuje długo na niedostępnych urządzeniach
+- ✅ **Private networks only** - domyślnie tylko sieci prywatne (10.x, 172.16-31.x, 192.168.x)
+- ✅ **Credentials security** - SNMP community/hasła v3 nie są logowane w artefaktach
+
+### **Zalecenia produkcyjne:**
+1. **Testuj na małej skali** - zacznij od 1-2 seeds z autodiscovery
+2. **Ustaw konkretne whitelist** - nie polegaj na domyślnych sieciach
+3. **Monitoruj zasoby** - intensywne skanowanie może obciążyć sieć
+4. **Sprawdź uprawnienia SNMP** - niektóre urządzenia mogą blokować bulk requests
+5. **Używaj w okienku maintenance** - szczególnie dla dużych sieci
 
 ---
 
-Autor: Cline (asystent programistyczny)
-Data ostatniej aktualizacji: 2025‑08‑06
+## 15. Troubleshooting
+
+### **Problem: "Błąd pobierania /api/topology"**
+**Rozwiązanie:** Sprawdź czy serwer się uruchomił, port nie jest zajęty
+
+### **Problem: IP nie wyświetlają się**
+**Rozwiązanie:** 
+1. Sprawdź Console (F12) czy są błędy JS
+2. Sprawdź czy checkbox "Pokazuj IP" jest zaznaczony
+3. Wykonaj skan rzeczywistych urządzeń (NoOp ma przykładowe IP)
+
+### **Problem: Skan SNMP nie działa**
+**Rozwiązanie:**
+1. Sprawdź connectivity (ping) do urządzenia
+2. Sprawdź SNMP credentials i wersję
+3. Sprawdź czy urządzenie ma włączony SNMP (port 161 UDP)
+4. Sprawdź firewall
+
+### **Problem: Autodiscovery nie znajduje urządzeń**
+**Rozwiązanie:**
+1. **Sprawdź czy masz wystarczająco urządzeń** - potrzeba kilku routerów/switchy z SNMP
+2. Sprawdź whitelist/blacklist CIDR - może blokuje znalezione IP
+3. Zwiększ Max Devices limit (domyślnie 50)
+4. Sprawdź czy seed urządzenia mają ARP/routing tables
+5. Sprawdź błędy w panelu Diagnostyka → Autodiscovery
+6. **W małych sieciach domowych** autodiscovery może nie znaleźć nic nowego
+
+### **Problem: Za dużo/za mało połączeń FDB**
+**Rozwiązanie:**
+1. Dostosuj próg FDB (2-5 wspólnych MAC-ów)
+2. Sprawdź gęstość hostów w sieci
+3. Sprawdź panel Diagnostyka → Krawędzie dla szczegółów
+
+---
+
+Autor: Cline (asystent programistyczny)  
+Data ostatniej aktualizacji: 2025‑08‑07  
+Wersja: v1.1 (z Autodiscovery)

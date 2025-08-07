@@ -55,11 +55,11 @@ func (c *NoOpCollector) Discover(ctx context.Context, targets []Target) (g.Topol
 
 	top := g.Topology{
 		Devices: []g.Device{
-			{ID: "core1", Name: "CORE-1", Vendor: "cisco", Role: "core"},
-			{ID: "dist1", Name: "DIST-1", Vendor: "aruba", Role: "distribution"},
-			{ID: "dist2", Name: "DIST-2", Vendor: "juniper", Role: "distribution"},
-			{ID: "acc1", Name: "ACC-1", Vendor: "mikrotik", Role: "access"},
-			{ID: "acc2", Name: "ACC-2", Vendor: "hpe", Role: "access"},
+			{ID: "core1", Name: "CORE-1", Vendor: "cisco", Role: "core", Evidence: &g.DeviceEvidence{MgmtIPs: []string{"10.0.0.1", "192.168.1.1"}}},
+			{ID: "dist1", Name: "DIST-1", Vendor: "aruba", Role: "distribution", Evidence: &g.DeviceEvidence{MgmtIPs: []string{"10.0.0.11"}}},
+			{ID: "dist2", Name: "DIST-2", Vendor: "juniper", Role: "distribution", Evidence: &g.DeviceEvidence{MgmtIPs: []string{"10.0.0.12"}}},
+			{ID: "acc1", Name: "ACC-1", Vendor: "mikrotik", Role: "access", Evidence: &g.DeviceEvidence{MgmtIPs: []string{"10.0.0.21"}}},
+			{ID: "acc2", Name: "ACC-2", Vendor: "hpe", Role: "access", Evidence: &g.DeviceEvidence{MgmtIPs: []string{"10.0.0.22"}}},
 		},
 		Links: []g.Link{
 			{ID: "e1", ADeviceID: "core1", AIfName: "Te1/1", BDeviceID: "dist1", BIfName: "Te1/1", Type: "trunk", Label: "10,20,30", Score: "high"},

@@ -34,6 +34,53 @@ func NewGoSNMP() *GoSNMPCollector {
 }
 
 func (c *GoSNMPCollector) Discover(ctx context.Context, targets []Target) (g.Topology, error) {
+	return c.DiscoverWithOptions(ctx, targets, DiscoverOptions{FDBThreshold: 3})
+}
+
+type DiscoverOptions struct {
+	FDBThreshold  int                   // minimum shared MACs for FDB correlation (default: 3)
+	CDPDebug      bool                  // include raw CDP dumps in diagnostics
+	Autodiscovery AutodiscoveryOptions  // automatic network expansion settings
+}
+
+func (c *GoSNMPCollector) DiscoverWithOptions(ctx context.Context, targets []Target, opts DiscoverOptions) (g.Topology, error) {
+	if opts.FDBThreshold <= 0 {
+		opts.FDBThreshold = 3
+	}
+	
+	// Expand targets using autodiscovery if enabled
+	finalTargets := targets
+	var autodiscoveryResult *AutodiscoveryResult
+	
+	if opts.Autodiscovery.Enabled {
+		autodiscoverer, err := NewAutodiscoverer(c, opts.Autodiscovery)
+		if err != nil {
+			return g.Topology{}, fmt.Errorf("autodiscovery setup failed: %w", err)
+		}
+		
+		result, err := autodiscoverer.ExpandTargets(ctx, targets)
+		if err != nil {
+			return g.Topology{}, fmt.Errorf("autodiscovery failed: %w", err)
+		}
+		
+		autodiscoveryResult = &result
+		
+		// Convert discovered targets to Target structs
+		// Use the same credentials as the first seed for discovered devices
+		defaultCred := Credentials{Version: "v2c", Community: "public"}
+		if len(targets) > 0 {
+			defaultCred = targets[0].Credentials
+		}
+		
+		for _, discovered := range result.DiscoveredTargets {
+			if discovered.Reachable {
+				finalTargets = append(finalTargets, Target{
+					Address:     discovered.Address,
+					Credentials: defaultCred,
+				})
+			}
+		}
+	}
 	top := g.Topology{}
 	// track per-device evidence
 	devEvidence := map[string]*g.DeviceEvidence{}
@@ -44,7 +91,7 @@ func (c *GoSNMPCollector) Discover(ctx context.Context, targets []Target) (g.Top
 	// temporary storage for FDB data per device to correlate after scanning all seeds
 	deviceFDB := map[string]deviceFDBEntry{}
 
-	for _, t := range targets {
+	for _, t := range finalTargets {
 		select {
 		case <-ctx.Done():
 			return top, ctx.Err()
@@ -97,30 +144,30 @@ func (c *GoSNMPCollector) Discover(ctx context.Context, targets []Target) (g.Top
 		addRawWalk(sn, ".1.3.6.1.4.1.9.9.23.1.2.1.1.9", rawCDP)
 		addRawWalk(sn, ".1.3.6.1.4.1.9.9.23.1.2.1.1.2", rawCDP)
 
-		cdpDevIDs := walkString(sn, ".1.3.6.1.4.1.9.9.23.1.2.1.1.6")
-		cdpDevPorts := walkString(sn, ".1.3.6.1.4.1.9.9.23.1.2.1.1.7")
-		cdpCaps := walkInt(sn, ".1.3.6.1.4.1.9.9.23.1.2.1.1.9")
-		cdpLocalIf := walkInt(sn, ".1.3.6.1.4.1.9.9.23.1.2.1.1.2")
+		cdpDevIDs := walkStringIndex(sn, ".1.3.6.1.4.1.9.9.23.1.2.1.1.6")
+		cdpDevPorts := walkStringIndex(sn, ".1.3.6.1.4.1.9.9.23.1.2.1.1.7")
+		cdpCaps := walkIntIndex(sn, ".1.3.6.1.4.1.9.9.23.1.2.1.1.9")
+		cdpLocalIf := walkIntIndex(sn, ".1.3.6.1.4.1.9.9.23.1.2.1.1.2")
 
-		for i := 0; i < len(cdpDevIDs); i++ {
-			peerName := cdpDevIDs[i]
-			peerPort := ""
-			if i < len(cdpDevPorts) {
-				peerPort = cdpDevPorts[i]
+		for idx, peerName := range cdpDevIDs {
+			peerPort, _ := cdpDevPorts[idx]
+			capVal, _ := cdpCaps[idx]
+			localIfIdx, _ := cdpLocalIf[idx]
+
+			capStr := ""
+			if capVal > 0 {
+				capStr = fmt.Sprintf("0x%x", capVal)
 			}
-			var capStr string
-			if i < len(cdpCaps) {
-				capStr = fmt.Sprintf("0x%x", cdpCaps[i])
-			}
+
 			localIf := ""
-			if i < len(cdpLocalIf) && cdpLocalIf[i] > 0 {
-				idx := cdpLocalIf[i]
-				localIf = ifNames[idx]
+			if localIfIdx > 0 {
+				localIf = ifNames[localIfIdx]
 				if localIf == "" {
-					localIf = ifDescr[idx]
+					localIf = ifDescr[localIfIdx]
 				}
 				if localIf == "" {
-					localIf = fmt.Sprintf("ifIndex%d", idx)
+					localIf = fmt.Sprintf("ifIndex%d", localIfIdx)
+					devEvidence[deviceID].OidErrors = append(devEvidence[deviceID].OidErrors, fmt.Sprintf("cdp: no ifName/ifDescr for ifIndex %d", localIfIdx))
 				}
 			}
 
@@ -132,7 +179,7 @@ func (c *GoSNMPCollector) Discover(ctx context.Context, targets []Target) (g.Top
 				top.Devices = append(top.Devices, g.Device{
 					ID:     peerID,
 					Name:   firstNonEmpty(peerName, peerID),
-					Role:   "unknown",
+					Role:   guessRoleFromCDPCaps(capVal),
 					Vendor: "",
 				})
 				seen[peerID] = true
@@ -213,6 +260,7 @@ func (c *GoSNMPCollector) Discover(ctx context.Context, targets []Target) (g.Top
 		// remSysName: 1.0.8802.1.1.2.1.4.1.1.9
 		// remPortId:  1.0.8802.1.1.2.1.4.1.1.7
 		// remLocalPortNum (index): 1.0.8802.1.1.2.1.4.1.1.2
+		// remMgmtAddr: 1.0.8802.1.1.2.1.4.2.1.4 (OID + chassisId + portId + ...)
 		remSysNames := walkString(sn, ".1.0.8802.1.1.2.1.4.1.1.9")
 		remPortIds := walkString(sn, ".1.0.8802.1.1.2.1.4.1.1.7")
 		remLocalPortNums := walkInt(sn, ".1.0.8802.1.1.2.1.4.1.1.2")
@@ -221,6 +269,72 @@ func (c *GoSNMPCollector) Discover(ctx context.Context, targets []Target) (g.Top
 		devEvidence[deviceID].LldpRemoteCount = len(remSysNames)
 		// We approximate local count as number of ports that have description in lldpLocPortDesc
 		devEvidence[deviceID].LldpLocalCount = len(locPortDesc)
+
+		// Collect management IPs from multiple sources
+		seenIPs := map[string]struct{}{}
+		
+		// 1. Add the target IP itself (most reliable)
+		targetIP := strings.Split(addr, ":")[0]
+		if ip := net.ParseIP(targetIP); ip != nil && !ip.IsUnspecified() {
+			seenIPs[ip.String()] = struct{}{}
+		}
+		
+		// 2. Try to get device's own management IP from ipAddrTable (1.3.6.1.2.1.4.20.1.1)
+		ownIPs := walkString(sn, ".1.3.6.1.2.1.4.20.1.1")
+		for _, ipStr := range ownIPs {
+			if ip := net.ParseIP(ipStr); ip != nil && !ip.IsUnspecified() && !ip.IsLoopback() {
+				seenIPs[ip.String()] = struct{}{}
+			}
+		}
+		
+		// 3. Collect LLDP remote management addresses (best-effort)
+		// lldpRemManAddrTable: .1.0.8802.1.1.2.1.4.2
+		// The index is complex, so we walk the address OID and parse what we can.
+		// lldpRemManAddr: .1.0.8802.1.1.2.1.4.2.1.4
+		mgmtAddrs := walkString(sn, ".1.0.8802.1.1.2.1.4.2.1.4")
+		for _, addr := range mgmtAddrs {
+			// Try parsing as string IP first
+			if ip := net.ParseIP(addr); ip != nil && !ip.IsUnspecified() {
+				seenIPs[ip.String()] = struct{}{}
+				continue
+			}
+			// Try parsing as binary (4 bytes for IPv4, 16 for IPv6)
+			if len(addr) == 4 {
+				ip := net.IPv4(addr[0], addr[1], addr[2], addr[3])
+				if !ip.IsUnspecified() && !ip.IsLoopback() {
+					seenIPs[ip.String()] = struct{}{}
+				}
+			} else if len(addr) == 16 {
+				ip := net.IP(addr)
+				if !ip.IsUnspecified() && !ip.IsLoopback() {
+					seenIPs[ip.String()] = struct{}{}
+				}
+			}
+		}
+		
+		// 4. Try LLDP local management addresses (.1.0.8802.1.1.2.1.3.8.1.5)
+		localMgmtAddrs := walkString(sn, ".1.0.8802.1.1.2.1.3.8.1.5")
+		for _, addr := range localMgmtAddrs {
+			if ip := net.ParseIP(addr); ip != nil && !ip.IsUnspecified() && !ip.IsLoopback() {
+				seenIPs[ip.String()] = struct{}{}
+			}
+			// Try binary parsing
+			if len(addr) == 4 {
+				ip := net.IPv4(addr[0], addr[1], addr[2], addr[3])
+				if !ip.IsUnspecified() && !ip.IsLoopback() {
+					seenIPs[ip.String()] = struct{}{}
+				}
+			}
+		}
+		
+		// Convert to sorted slice
+		for ip := range seenIPs {
+			devEvidence[deviceID].MgmtIPs = append(devEvidence[deviceID].MgmtIPs, ip)
+		}
+		// Sort for consistent output
+		if len(devEvidence[deviceID].MgmtIPs) > 1 {
+			sort.Strings(devEvidence[deviceID].MgmtIPs)
+		}
 
 		// Build links based on LLDP rem entries: indexes pattern (chassisId, portId, localPortNum) — we only use localPortNum
 		for i := 0; i < len(remSysNames) && i < len(remPortIds) && i < len(remLocalPortNums); i++ {
@@ -354,7 +468,7 @@ func (c *GoSNMPCollector) Discover(ctx context.Context, targets []Target) (g.Top
 	}
 
 	// Korelacja między urządzeniami (confidence=medium): wspólne MAC w tym samym VLAN
-	buildFDBLinks(&top, deviceFDB)
+	buildFDBLinks(&top, deviceFDB, opts.FDBThreshold)
 
 	// attach per-device evidence to device structs
 	for i := range top.Devices {
@@ -364,11 +478,29 @@ func (c *GoSNMPCollector) Discover(ctx context.Context, targets []Target) (g.Top
 	}
 
 	// Jeśli mamy surowy zrzut CDP – zapisz go do top.Raw, by UI mógł go pokazać (Diagnostics.Raw w API)
-	if len(rawCDP) > 0 {
+	if opts.CDPDebug && len(rawCDP) > 0 {
 		if top.Raw == nil {
 			top.Raw = map[string]map[string]string{}
 		}
 		top.Raw["cdp"] = rawCDP
+	}
+	
+	// Add autodiscovery results to raw data if available
+	if autodiscoveryResult != nil {
+		if top.Raw == nil {
+			top.Raw = map[string]map[string]string{}
+		}
+		// Convert autodiscovery result to string map for raw storage
+		autodiscoveryData := map[string]string{
+			"totalDevices":    fmt.Sprintf("%d", autodiscoveryResult.TotalDevices),
+			"maxDepthReached": fmt.Sprintf("%d", autodiscoveryResult.MaxDepthReached),
+			"duration":        autodiscoveryResult.Duration.String(),
+			"originalSeeds":   strings.Join(autodiscoveryResult.OriginalSeeds, ","),
+		}
+		if len(autodiscoveryResult.Errors) > 0 {
+			autodiscoveryData["errors"] = strings.Join(autodiscoveryResult.Errors, "; ")
+		}
+		top.Raw["autodiscovery"] = autodiscoveryData
 	}
 
 	return top, nil
@@ -558,7 +690,7 @@ type deviceFDBEntry struct {
 	IfDescr    map[int]string
 }
 
-func buildFDBLinks(top *g.Topology, fdb map[string]deviceFDBEntry) {
+func buildFDBLinks(top *g.Topology, fdb map[string]deviceFDBEntry, threshold int) {
 	// iterate pairs of devices and search VLAN where they share host MACs learned on access ports
 	type edgeCand struct {
 		aDev, aIf string
@@ -599,7 +731,7 @@ func buildFDBLinks(top *g.Topology, fdb map[string]deviceFDBEntry) {
 						// intersection size (shared hosts) – if there are common MACs on both interfaces in same VLAN,
 						// it's very likely these ports are uplinked
 						shared := interSize(mA, mB)
-						if shared >= 3 { // threshold 3 host MACs
+						if shared >= threshold { // configurable threshold
 							aName := firstNonEmpty(a.IfNames[aIf], a.IfDescr[aIf], fmt.Sprintf("ifIndex%d", aIf))
 							bName := firstNonEmpty(b.IfNames[bIf], b.IfDescr[bIf], fmt.Sprintf("ifIndex%d", bIf))
 							edges = append(edges, edgeCand{
@@ -753,4 +885,17 @@ func parsePort(hostport string, def int) int {
 		}
 	}
 	return def
+}
+
+func guessRoleFromCDPCaps(caps int) string {
+	if (caps & 0x01) != 0 {
+		return "router"
+	}
+	if (caps & 0x02) != 0 {
+		return "switch"
+	}
+	if (caps & 0x08) != 0 {
+		return "switch"
+	}
+	return "unknown"
 }
