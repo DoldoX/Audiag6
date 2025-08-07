@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <title>AuditTopology – Podgląd</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { height: 100%; margin: 0; font-family: Arial, sans-serif; background: #0f172a; color: #e2e8f0; }
+    header { padding: 10px 16px; border-bottom: 1px solid #334155; display: flex; align-items: center; justify-content: space-between; }
+    header h1 { font-size: 16px; margin: 0; }
+    .actions { display: flex; gap: 8px; }
+    button { background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+    button:hover { background: #334155; }
+    #cy { width: 100%; height: calc(100% - 52px); display: block; }
+    .legend { font-size: 12px; color: #94a3b8; }
+  </style>
+  <script src="https://unpkg.com/cytoscape@3.27.0/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/elkjs@0.9.1/lib/elk.bundled.js"></script>
+</head>
+<body>
+  <header>
+    <h1>AuditTopology – Podgląd topologii (MVP)</h1>
+    <div class="actions">
+      <button id="btnReload">Przeładuj</button>
+      <button id="btnExportPNG">Eksport PNG</button>
+      <button id="btnExportSVG">Eksport SVG</button>
+      <button id="btnExportPDF">Eksport PDF</button>
+    </div>
+  </header>
+  <div id="cy"></div>
+  <div id="diagPanel" style="position:absolute; right:12px; top:56px; width:520px; max-height:75%; overflow:auto; background:#0b1220; border:1px solid #334155; border-radius:8px; padding:12px; display:none;">
+    <h3 style="margin:0 0 8px 0; font-size:14px;">Diagnostyka skanu</h3>
+    <div class="muted" id="diagSummary">Brak danych diagnostycznych – wykonaj skan.</div>
+    <h4>Urządzenia</h4>
+    <table class="tbl" id="tblDevices" style="width:100%; border-collapse:collapse; font-size:12px;">
+      <thead><tr><th>Nazwa</th><th>LLDP (local/remote)</th><th>FDB wpisy</th><th>VLANy</th><th>Błędy</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h4>Krawędzie</h4>
+    <table class="tbl" id="tblEdges" style="width:100%; border-collapse:collapse; font-size:12px;">
+      <thead><tr><th>Źródło</th><th>Pewność</th><th>A</th><th>B</th><th>VLAN</th><th>sharedMacs</th><th>sampleMacs</th><th>Info</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h4>Surowe (JSON)</h4>
+    <pre class="json" id="rawJson" style="background:#0a0f1a; border:1px solid #233047; border-radius:6px; padding:8px; white-space:pre-wrap;"></pre>
+  </div>
+
+  <script>
+    const elk = new ELK();
+    // prosta obsługa panelu diagnostyki (bez przycisku – pokaż na reload i przy błędzie)
+    function showDiagPanel() {
+      const p = document.getElementById('diagPanel');
+      if (p) p.style.display = 'block';
+    }
+    function hideDiagPanel() {
+      const p = document.getElementById('diagPanel');
+      if (p) p.style.display = 'none';
+    }
+
+    async function fetchTopology() {
+      const res = await fetch('/api/topology');
+      if (!res.ok) throw new Error('Błąd pobierania /api/topology');
+      return res.json();
+    }
+
+    function mapToCytoscape(top) {
+      const elements = [];
+      const roleToColor = {
+        core: '#60a5fa',
+        distribution: '#22d3ee',
+        access: '#34d399'
+      };
+      const vendorToShape = {
+        cisco: 'round-rectangle',
+        aruba: 'round-rectangle',
+        juniper: 'round-rectangle',
+        mikrotik: 'round-rectangle',
+        hpe: 'round-rectangle',
+        default: 'round-rectangle'
+      };
+
+      top.nodes.forEach(n => {
+        elements.push({
+          data: {
+            id: n.id,
+            label: n.label,
+            role: n.role || 'unknown',
+            vendor: n.vendor || 'default'
+          },
+          classes: n.role || ''
+        });
+      });
+
+      top.edges.forEach(e => {
+        elements.push({
+          data: {
+            id: e.id,
+            source: e.source,
+            target: e.target,
+            type: e.type || 'link',
+            label: e.label || '',
+            score: e.score || 'low'
+          },
+          classes: e.type || 'link'
+        });
+      });
+
+      const style = [
+        { selector: 'node', style: {
+            'background-color': ele => roleToColor[ele.data('role')] || '#818cf8',
+            'shape': ele => vendorToShape[ele.data('vendor')] || vendorToShape.default,
+            'label': 'data(label)',
+            'text-valign': 'center',
+            'text-halign': 'center',
+            'color': '#e2e8f0',
+            'font-size': 10,
+            'width': 'label',
+            'height': 'label',
+            'padding': '8px',
+            'border-width': 1,
+            'border-color': '#0b1220',
+          } },
+        { selector: 'edge', style: {
+            'curve-style': 'straight',
+            'line-color': '#64748b',
+            'target-arrow-shape': 'triangle',
+            'target-arrow-color': '#64748b',
+            'width': 2,
+            'label': 'data(label)',
+            'font-size': 8,
+            'color': '#94a3b8',
+            'text-background-color': '#0b1220',
+            'text-background-opacity': 0.8,
+            'text-background-padding': 2
+          } },
+        { selector: 'edge.trunk', style: { 'line-color': '#94a3b8', 'width': 3, 'target-arrow-color': '#94a3b8' } },
+        { selector: 'edge.access', style: { 'line-color': '#22c55e', 'width': 2, 'target-arrow-color': '#22c55e' } },
+        { selector: 'edge.lag', style: { 'line-color': '#eab308', 'width': 4, 'target-arrow-color': '#eab308' } },
+      ];
+
+      return { elements, style };
+    }
+
+    async function layoutWithElk(cy) {
+      // Build ELK graph from current elements
+      const elkGraph = {
+        id: 'root',
+        layoutOptions: {
+          'elk.algorithm': 'layered',
+          'elk.layered.spacing.nodeNodeBetweenLayers': '80',
+          'elk.spacing.nodeNode': '40',
+          'elk.direction': 'DOWN'
+        },
+        children: cy.nodes().map(n => ({
+          id: n.id(),
+          width: Math.max(80, n.boundingBox().w || 80),
+          height: Math.max(32, n.boundingBox().h || 32)
+        })),
+        edges: cy.edges().map(e => ({
+          id: e.id(),
+          sources: [e.source().id()],
+          targets: [e.target().id()]
+        }))
+      };
+
+      const res = await elk.layout(elkGraph);
+      // Apply positions
+      const positions = {};
+      res.children.forEach(c => { positions[c.id] = { x: c.x, y: c.y }; });
+      cy.nodes().positions(n => positions[n.id()]);
+      cy.fit(undefined, 30);
+    }
+
+    async function init() {
+      try {
+        const top = await fetchTopology();
+        const { elements, style } = mapToCytoscape(top);
+
+        const cy = cytoscape({
+          container: document.getElementById('cy'),
+          elements,
+          style,
+          wheelSensitivity: 0.2,
+        });
+
+        await layoutWithElk(cy);
+
+        document.getElementById('btnReload').onclick = async () => {
+          const top2 = await fetchTopology();
+          const mapped = mapToCytoscape(top2);
+          cy.elements().remove();
+          cy.add(mapped.elements);
+          cy.style().fromJson(mapped.style);
+          await layoutWithElk(cy);
+          // pokaż podstawową diagnostykę dla /api/topology (bez evidence, tylko liczby)
+          showDiagPanel();
+          const diag = { stats: { nodes: mapped.elements.filter(e => e.data && e.data.source === undefined).length, edges: mapped.elements.filter(e => e.data && e.data.source !== undefined).length, source: [] } };
+          try { document.getElementById('rawJson').textContent = JSON.stringify({ topology: top2, diagnostics: diag }, null, 2); } catch {}
+          document.getElementById('diagSummary').textContent = `Węzły: ${(top2.nodes||[]).length}, Krawędzie: ${(top2.edges||[]).length}. Źródła: -`;
+        };
+
+        document.getElementById('btnExportPNG').onclick = () => {
+          const png = cy.png({ full: true, scale: 2, bg: '#0f172a' });
+          downloadDataURI(png, 'topology.png');
+        };
+        document.getElementById('btnExportSVG').onclick = () => {
+          const svg = cy.svg({ full: true, scale: 1, bg: '#0f172a' });
+          downloadDataURI('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg), 'topology.svg');
+        };
+        document.getElementById('btnExportPDF').onclick = () => {
+          window.print();
+        };
+
+      } catch (e) {
+        alert('Błąd inicjalizacji: ' + e.message);
+        console.error(e);
+        showDiagPanel();
+      }
+    }
+
+    function downloadDataURI(uri, filename) {
+      const a = document.createElement('a');
+      a.href = uri;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+
+    // dodatkowa funkcja do aktualizacji panelu diagnostyki korzystając z TopologyPayload (nodes[].evidence, edges[].evidence)
+    function renderDiagnosticsFromTopology(topology) {
+      showDiagPanel();
+      const sum = document.getElementById('diagSummary');
+      const devTbody = document.querySelector('#tblDevices tbody');
+      const edgeTbody = document.querySelector('#tblEdges tbody');
+      const raw = document.getElementById('rawJson');
+      devTbody.innerHTML = '';
+      edgeTbody.innerHTML = '';
+
+      const nodes = topology.nodes || [];
+      const edges = topology.edges || [];
+      sum.textContent = `Węzły: ${nodes.length}, Krawędzie: ${edges.length}. Źródła: auto`;
+
+      nodes.forEach(n => {
+        const ev = n.evidence || {};
+        const tr = document.createElement('tr');
+        const lldp = `loc:${ev.lldpLocalCount ?? 0}/rem:${ev.lldpRemoteCount ?? 0}`;
+        const fdb = ev.fdbTotalEntries ?? 0;
+        const vlanCount = ev.vlanCount ?? 0;
+        const err = Array.isArray(ev.oidErrors) ? ev.oidErrors.slice(0,2).join('; ') : '';
+        tr.innerHTML = `<td>${n.label||n.id||'-'}</td><td>${lldp}</td><td>${fdb}</td><td>${vlanCount}</td><td>${err}</td>`;
+        devTbody.appendChild(tr);
+      });
+
+      edges.forEach(e => {
+        const ev = e.evidence || {};
+        const src = ev.source || '-';
+        const conf = ev.confidence || 'low';
+        const a = ev.a ? `${ev.a.device||''}:${ev.a.if||''}` : '';
+        const b = ev.b ? `${ev.b.device||''}:${ev.b.if||''}` : '';
+        const vlan = (typeof ev.vlan === 'number') ? ev.vlan : '';
+        const shared = (typeof ev.sharedMacs === 'number') ? ev.sharedMacs : '';
+        const samples = Array.isArray(ev.sampleMacs) ? ev.sampleMacs.slice(0,5).join(', ') : '';
+        const info = Array.isArray(ev.usedOids) ? ev.usedOids.join(', ') : '';
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${src}</td><td>${conf}</td><td>${a}</td><td>${b}</td><td>${vlan}</td><td>${shared}</td><td>${samples}</td><td>${info}</td>`;
+        edgeTbody.appendChild(tr);
+      });
+
+      try { raw.textContent = JSON.stringify({ topology }, null, 2); } catch {}
+    }
+
+    // przeładuj i pokaż prostą diagnostykę
+    init().then(() => showDiagPanel()).catch(() => showDiagPanel());
+  </script>
+</body>
+</html>
+  </script>
+</body>
+</html>

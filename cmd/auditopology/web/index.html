@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <title>AuditTopology – Skan L2 (MVP)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { height: 100%; margin: 0; font-family: Arial, sans-serif; background: #0f172a; color: #e2e8f0; }
+    header { padding: 10px 16px; border-bottom: 1px solid #334155; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    header h1 { font-size: 16px; margin: 0; }
+    .actions { display: flex; gap: 8px; }
+    button { background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+    button:hover { background: #334155; }
+    #container { display: grid; grid-template-columns: 320px 1fr; height: calc(100% - 52px); }
+    #diagPanel { position: absolute; right: 12px; top: 56px; width: 520px; max-height: 75%; overflow: auto; background:#0b1220; border:1px solid #334155; border-radius:8px; padding:12px; display:none; }
+    #diagPanel h3 { margin: 0 0 8px 0; font-size: 14px; }
+    .tbl { width:100%; border-collapse: collapse; font-size: 12px; }
+    .tbl th, .tbl td { border-bottom: 1px solid #243244; padding:6px 8px; text-align:left; }
+    .badge { display:inline-block; padding:2px 6px; border-radius: 4px; font-size: 11px; }
+    .b-high { background:#14532d; color:#a7f3d0; }
+    .b-medium { background:#374151; color:#e5e7eb; }
+    .muted { color:#94a3b8; }
+    pre.json { background:#0a0f1a; border:1px solid #233047; border-radius:6px; padding:8px; white-space: pre-wrap; }
+    #sidebar { border-right: 1px solid #334155; padding: 12px; overflow: auto; }
+    #cy { width: 100%; height: 100%; display: block; }
+    .legend { font-size: 12px; color: #94a3b8; }
+    .field { margin-bottom: 10px; }
+    .field label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 4px; }
+    input[type="text"], input[type="password"], select, textarea {
+      width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #334155; background: #0b1220; color: #e2e8f0;
+    }
+    textarea { resize: vertical; min-height: 60px; }
+    .note { font-size: 12px; color: #94a3b8; }
+    .status { margin-top: 8px; font-size: 12px; color: #a3e635; }
+    .error { color: #ef4444; }
+  </style>
+  <script src="https://unpkg.com/cytoscape@3.27.0/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/elkjs@0.9.1/lib/elk.bundled.js"></script>
+  <script src="https://unpkg.com/cytoscape-svg@0.4.0/cytoscape-svg.js"></script>
+</head>
+<body>
+  <header>
+    <h1>AuditTopology – Skan L2 (MVP)</h1>
+    <div class="actions">
+      <button id="btnReload">Przeładuj</button>
+      <button id="btnExportPNG">Eksport PNG</button>
+      <button id="btnExportSVG">Eksport SVG</button>
+      <button id="btnExportPDF">Eksport PDF</button>
+      <button id="btnDiag">Diagnostyka</button>
+    </div>
+  </header>
+
+  <div id="container">
+    <aside id="sidebar">
+      <h3>1) Parametry skanu</h3>
+      <div class="field">
+        <label>Seed urządzenia (IP/FQDN, po jednym w linii)</label>
+        <textarea id="seeds" placeholder="10.0.0.1&#10;core-1.example.local">seed1.local</textarea>
+      </div>
+      <div class="field">
+        <label>SNMP wersja</label>
+        <select id="snmpVersion">
+          <option value="v2c" selected>v2c</option>
+          <option value="v3">v3</option>
+        </select>
+      </div>
+      <div id="snmpV2" class="field">
+        <label>Community (ro)</label>
+        <input type="text" id="community" placeholder="public" value="public" />
+      </div>
+      <div id="snmpV3" style="display:none">
+        <div class="field"><label>User</label><input type="text" id="v3user" placeholder="snmpuser" /></div>
+        <div class="field"><label>Auth proto</label><input type="text" id="v3authproto" placeholder="SHA" /></div>
+        <div class="field"><label>Auth pass</label><input type="password" id="v3authpass" placeholder="*****" /></div>
+        <div class="field"><label>Priv proto</label><input type="text" id="v3privproto" placeholder="AES128" /></div>
+        <div class="field"><label>Priv pass</label><input type="password" id="v3privpass" placeholder="*****" /></div>
+      </div>
+      <button id="btnScan">Skanuj</button>
+      <div id="status" class="status"></div>
+      <hr/>
+      <div class="note">
+        Ten prototyp uruchamia pipeline z kolektorem NoOp (dane przykładowe). W następnym kroku podłączymy realny SNMP.
+      </div>
+    </aside>
+    <main id="cy"></main>
+  </div>
+
+  <!-- Panel diagnostyczny -->
+  <div id="diagPanel">
+    <h3>Diagnostyka skanu</h3>
+    <div class="muted" id="diagSummary">Brak danych diagnostycznych – wykonaj skan.</div>
+    <h4>Urządzenia</h4>
+    <table class="tbl" id="tblDevices">
+      <thead><tr><th>Nazwa</th><th>LLDP (local/remote)</th><th>FDB wpisy</th><th>VLANy</th><th>Błędy</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h4>Krawędzie</h4>
+    <table class="tbl" id="tblEdges">
+      <thead><tr><th>Źródło</th><th>Pewność</th><th>A</th><th>B</th><th>VLAN</th><th>sharedMacs</th><th>sampleMacs</th><th>Info</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h4>Surowe (JSON)</h4>
+    <pre class="json" id="rawJson"></pre>
+  </div>
+
+  <script>
+    const elk = new ELK();
+    cytoscape.use(cytoscapeSvg);
+
+    // UI state
+    const els = {
+      seeds: document.getElementById('seeds'),
+      snmpVersion: document.getElementById('snmpVersion'),
+      community: document.getElementById('community'),
+      v3: {
+        box: document.getElementById('snmpV3'),
+        user: document.getElementById('v3user'),
+        authproto: document.getElementById('v3authproto'),
+        authpass: document.getElementById('v3authpass'),
+        privproto: document.getElementById('v3privproto'),
+        privpass: document.getElementById('v3privpass'),
+      },
+      v2: document.getElementById('snmpV2'),
+      btnScan: document.getElementById('btnScan'),
+      status: document.getElementById('status'),
+    };
+
+    els.snmpVersion.addEventListener('change', () => {
+      const isV3 = els.snmpVersion.value === 'v3';
+      els.v3.box.style.display = isV3 ? '' : 'none';
+      els.v2.style.display = isV3 ? 'none' : '';
+    });
+
+    async function fetchTopology() {
+      const res = await fetch('/api/topology', { method: 'GET' });
+      if (!res.ok) throw new Error('Błąd pobierania /api/topology');
+      return res.json();
+    }
+
+    async function postScan(body) {
+      const res = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error('Błąd skanu /api/scan');
+      return res.json();
+    }
+
+    // Ostatnia diagnostyka
+    let lastDiagnostics = null;
+
+    function renderDiagnostics(diag, uiTop) {
+      lastDiagnostics = diag || null;
+      document.getElementById('diagPanel').style.display = 'block';
+      const sum = document.getElementById('diagSummary');
+      const devTbody = document.querySelector('#tblDevices tbody');
+      const edgeTbody = document.querySelector('#tblEdges tbody');
+      const raw = document.getElementById('rawJson');
+      devTbody.innerHTML = '';
+      edgeTbody.innerHTML = '';
+
+      // pokaż pełny JSON (topology + diagnostics) w panelu
+      try {
+        raw.textContent = JSON.stringify({ diagnostics: diag, topology: uiTop }, null, 2);
+      } catch { raw.textContent = String(diag); }
+
+      const stats = (diag && diag.stats) || {};
+      sum.innerHTML = `Węzły: ${stats.nodes ?? 0}, Krawędzie: ${stats.edges ?? 0}. Źródła: ${(stats.source||[]).join(', ')}`;
+
+      // Devices table: korzystamy z evidence przeniesionego do topology.nodes[].evidence
+      const nodes = (uiTop.nodes || []);
+      nodes.forEach(n => {
+        const ev = n.evidence || {};
+        const tr = document.createElement('tr');
+        const lldp = `loc:${ev.lldpLocalCount ?? 0}/rem:${ev.lldpRemoteCount ?? 0}`;
+        const fdb = ev.fdbTotalEntries ?? 0;
+        const vlanCount = ev.vlanCount ?? 0;
+        const err = Array.isArray(ev.oidErrors) ? ev.oidErrors.slice(0,2).join('; ') : '';
+        tr.innerHTML = `<td>${n.label||n.id||'-'}</td><td>${lldp}</td><td>${fdb}</td><td>${vlanCount}</td><td>${err}</td>`;
+        devTbody.appendChild(tr);
+      });
+
+      // Edges table: evidence z topology.edges[].evidence
+      const edges = (uiTop.edges || []);
+      edges.forEach(e => {
+        const ev = e.evidence || {};
+        const src = ev.source || '-';
+        const conf = ev.confidence || 'low';
+        const badge = conf === 'high' ? 'badge b-high' : 'badge b-medium';
+        const a = ev.a ? `${ev.a.device||''}:${ev.a.if||''}` : '';
+        const b = ev.b ? `${ev.b.device||''}:${ev.b.if||''}` : '';
+        const vlan = (typeof ev.vlan === 'number') ? ev.vlan : '';
+        const shared = (typeof ev.sharedMacs === 'number') ? ev.sharedMacs : '';
+        const samples = Array.isArray(ev.sampleMacs) ? ev.sampleMacs.slice(0,5).join(', ') : '';
+        const info = Array.isArray(ev.usedOids) ? ev.usedOids.join(', ') : '';
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${src}</td><td><span class="${badge}">${conf}</span></td><td>${a}</td><td>${b}</td><td>${vlan}</td><td>${shared}</td><td>${samples}</td><td>${info}</td>`;
+        edgeTbody.appendChild(tr);
+      });
+    }
+
+    function mapToCytoscape(top) {
+      const elements = [];
+      const roleToColor = { core: '#60a5fa', distribution: '#22d3ee', access: '#34d399' };
+      const vendorToShape = { default: 'round-rectangle' };
+
+      (top.nodes || []).forEach(n => {
+        elements.push({ data: { id: n.id, label: n.label, role: n.role || 'unknown', vendor: n.vendor || 'default' }, classes: n.role || '' });
+      });
+      (top.edges || []).forEach(e => {
+        elements.push({ data: { id: e.id, source: e.source, target: e.target, type: e.type || 'link', label: e.label || '', score: e.score || 'low' }, classes: e.type || 'link' });
+      });
+
+      const style = [
+        { selector: 'node', style: {
+          'background-color': ele => roleToColor[ele.data('role')] || '#818cf8',
+          'shape': ele => vendorToShape[ele.data('vendor')] || vendorToShape.default,
+          'label': 'data(label)',
+          'text-valign': 'center', 'text-halign': 'center',
+          'color': '#e2e8f0', 'font-size': 10,
+          'padding': '8px', 'border-width': 1, 'border-color': '#0b1220',
+          'width': 'mapData(label.length, 0, 20, 60, 120)',
+          'height': 32
+        }},
+        { selector: 'edge', style: {
+          'curve-style': 'straight', 'line-color': '#64748b',
+          'target-arrow-shape': 'triangle', 'target-arrow-color': '#64748b',
+          'width': 2, 'label': 'data(label)', 'font-size': 8, 'color': '#94a3b8',
+          'text-background-color': '#0b1220', 'text-background-opacity': 0.8, 'text-background-padding': 2
+        }},
+        { selector: 'edge.trunk', style: { 'line-color': '#94a3b8', 'width': 3, 'target-arrow-color': '#94a3b8' } },
+        { selector: 'edge.access', style: { 'line-color': '#22c55e', 'width': 2, 'target-arrow-color': '#22c55e' } },
+        { selector: 'edge.lag', style: { 'line-color': '#eab308', 'width': 4, 'target-arrow-color': '#eab308' } },
+      ];
+      return { elements, style };
+    }
+
+    async function layoutWithElk(cy) {
+      const elkGraph = {
+        id: 'root',
+        layoutOptions: { 'elk.algorithm': 'layered', 'elk.layered.spacing.nodeNodeBetweenLayers': '80', 'elk.spacing.nodeNode': '40', 'elk.direction': 'DOWN' },
+        children: cy.nodes().map(n => ({ id: n.id(), width: Math.max(80, n.boundingBox().w || 80), height: Math.max(32, n.boundingBox().h || 32) })),
+        edges: cy.edges().map(e => ({ id: e.id(), sources: [e.source().id()], targets: [e.target().id()] }))
+      };
+      const res = await elk.layout(elkGraph);
+      const positions = {}; (res.children || []).forEach(c => { positions[c.id] = { x: c.x, y: c.y }; });
+      cy.nodes().positions(n => positions[n.id()]);
+      cy.fit(undefined, 30);
+    }
+
+    let cy;
+
+    async function reload() {
+      const top = await fetchTopology();
+      const mapped = mapToCytoscape(top);
+      if (!cy) {
+        cy = cytoscape({ container: document.getElementById('cy'), elements: mapped.elements, style: mapped.style, wheelSensitivity: 0.2 });
+      } else {
+        cy.elements().remove();
+        cy.add(mapped.elements);
+        cy.style().fromJson(mapped.style);
+      }
+      await layoutWithElk(cy);
+    }
+
+    document.getElementById('btnReload').onclick = reload;
+
+    document.getElementById('btnExportPNG').onclick = () => {
+      const png = cy.png({ full: true, scale: 2, bg: '#0f172a' });
+      downloadDataURI(png, 'topology.png');
+    };
+    document.getElementById('btnExportSVG').onclick = () => {
+      const svg = cy.svg({ full: true, scale: 1, bg: '#0f172a' });
+      downloadDataURI('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg), 'topology.svg');
+    };
+    document.getElementById('btnExportPDF').onclick = () => window.print();
+
+    // Realny skan: POST /api/scan z danymi z formularza, a następnie render wyniku
+    els.btnScan.onclick = async () => {
+      try {
+        els.status.classList.remove('error');
+        els.status.textContent = 'Uruchamianie skanu SNMP...';
+        // Obsłuż zarówno podział po nowych liniach, jak i po przecinkach/średnikach/spacjach
+        const seeds = els.seeds.value
+          .split(/[\n,; ]+/)
+          .map(s => s.trim())
+          .filter(Boolean);
+        const body = {
+          seeds,
+          snmpVersion: els.snmpVersion.value,
+          community: els.community.value,
+          v3user: els.v3.user.value,
+          v3authproto: els.v3.authproto.value,
+          v3authpass: els.v3.authpass.value,
+          v3privproto: els.v3.privproto.value,
+          v3privpass: els.v3.privpass.value
+        };
+        const resp = await postScan(body);
+        if (resp.status !== 'ok') {
+          throw new Error(resp.error || 'Nieznany błąd skanu');
+        }
+        const mapped = mapToCytoscape(resp.topology || {});
+        if (resp.diagnostics) {
+          renderDiagnostics(resp.diagnostics, resp.topology || {});
+        } else {
+          document.getElementById('diagPanel').style.display = 'none';
+        }
+        if (!cy) {
+          cy = cytoscape({ container: document.getElementById('cy'), elements: mapped.elements, style: mapped.style, wheelSensitivity: 0.2 });
+        } else {
+          cy.elements().remove();
+          cy.add(mapped.elements);
+          cy.style().fromJson(mapped.style);
+        }
+        await layoutWithElk(cy);
+        els.status.textContent = 'Zakończono skan SNMP.';
+      } catch (e) {
+        els.status.classList.add('error');
+        els.status.textContent = 'Błąd: ' + e.message;
+        console.error(e);
+      }
+    };
+
+    function downloadDataURI(uri, filename) {
+      const a = document.createElement('a');
+      a.href = uri; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    }
+
+    // Panel diagnostyczny toggle
+    document.getElementById('btnDiag').onclick = () => {
+      const p = document.getElementById('diagPanel');
+      if (p.style.display === 'none' || p.style.display === '') {
+        if (lastDiagnostics) {
+          p.style.display = 'block';
+        } else {
+          // spróbuj pokazać ostatni wynik bez ponownego skanu
+          document.getElementById('diagSummary').textContent = 'Brak danych – wykonaj skan, aby zobaczyć diagnostykę.';
+          p.style.display = 'block';
+        }
+      } else {
+        p.style.display = 'none';
+      }
+    };
+
+    // Start
+    reload();
+  </script>
+</body>
+</html>
